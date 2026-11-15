@@ -1,0 +1,479 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="robots" content="noindex,nofollow">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Earth 신경망 지도</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+  /* 어두운 화면 하나. 점 색 = 모듈, 선 색 = 영향 방향(올림 주황, 내림 하늘, 막음 빨강, 기타 보라). */
+  :root {
+    --bg: #05070c; --panel: rgba(12,17,26,0.88); --line: #233041; --fg: #e8eef5; --muted: #8b9aab;
+    --up: #ffb347; --down: #4fc3ff; --block: #ff5a6a; --other: #b490ff;
+    --font: "Noto Sans KR", system-ui, sans-serif; --mono: ui-monospace, Consolas, monospace;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--fg); font-family: var(--font); overflow: hidden;
+         padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  #gl { position: fixed; inset: 0; }
+  #labels { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+  .lb { position: absolute; font-size: 11px; color: #dfe8f2; white-space: nowrap; transform: translate(-50%, -150%);
+        text-shadow: 0 0 4px #000, 0 0 8px #000; opacity: 0.85; }
+  .lb.sel { font-size: 13px; font-weight: 600; color: #fff; opacity: 1; }
+  .ui { position: fixed; z-index: 2; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+        backdrop-filter: blur(6px); }
+  #top { top: calc(12px + env(safe-area-inset-top, 0px)); left: max(16px, env(safe-area-inset-left, 0px)); right: calc(max(16px, env(safe-area-inset-right, 0px)) + 120px); max-width: 760px; padding: 10px 12px; }
+  #top h1 { margin: 0; font-size: 16px; font-weight: 600; display: inline; }
+  #top .stat { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-left: 8px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-top: 8px; font-size: 12px; color: var(--muted); }
+  .row label { display: inline-flex; gap: 6px; align-items: center; }
+  input[type=range] { width: 110px; accent-color: var(--up); }
+  #search { font: inherit; font-size: 12px; background: #0b111a; color: var(--fg); border: 1px solid var(--line);
+            border-radius: 6px; padding: 4px 8px; width: 170px; }
+  button { font: inherit; font-size: 12px; color: var(--fg); background: #0b111a; border: 1px solid var(--line);
+           border-radius: 6px; padding: 4px 9px; cursor: pointer; }
+  button[aria-pressed=true] { border-color: var(--up); color: var(--up); }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; max-height: 64px; overflow: auto; }
+  .chip { font-size: 11px; padding: 2px 8px; border-radius: 999px; display: inline-flex; gap: 5px; align-items: center; }
+  .chip i { width: 7px; height: 7px; border-radius: 50%; background: var(--c); }
+  .chip[aria-pressed=true] { border-color: var(--line); color: var(--fg); }
+  .chip[aria-pressed=false] { opacity: 0.35; }
+  .legend { display: flex; gap: 10px; font-size: 11px; }
+  .legend b { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 4px; }
+  #info { right: 16px; bottom: 16px; width: min(440px, calc(100vw - 32px)); max-height: 52vh; overflow: auto;
+          padding: 12px 14px; font-size: 12px; line-height: 1.5; display: none; }
+  #info h2 { margin: 0; font-size: 15px; }
+  #info .meta { color: var(--muted); font-family: var(--mono); font-size: 11px; margin: 2px 0 8px; }
+  #info h3 { font-size: 12px; margin: 10px 0 4px; color: var(--muted); font-weight: 600; }
+  #info ul { list-style: none; margin: 0; padding: 0; }
+  #info li { padding: 4px 0; border-top: 1px solid #1a2433; cursor: pointer; }
+  #info li:hover { background: #111a27; }
+  #info li .f { color: var(--muted); font-family: var(--mono); font-size: 10.5px; display: block; }
+  #info .x { float: right; }
+  #hint { left: 16px; bottom: 16px; padding: 6px 10px; font-size: 11px; color: var(--muted); }
+  #toggle { display: none; float: right; }
+  #full { position: fixed; z-index: 4; right: max(16px, env(safe-area-inset-right, 0px));
+          top: calc(12px + env(safe-area-inset-top, 0px)); padding: 6px 10px; background: var(--panel); }
+  body.immersive #top, body.immersive #hint, body.immersive #labels { display: none; }
+  body.immersive #full { opacity: 0.55; }
+  #info details { margin-top: 2px; }
+  #info summary { color: var(--muted); font-size: 10.5px; cursor: pointer; }
+  @media (max-width: 640px) {
+    #hint { display: none; }
+    #top { top: calc(8px + env(safe-area-inset-top, 0px)); left: max(8px, env(safe-area-inset-left, 0px)); right: calc(max(8px, env(safe-area-inset-right, 0px)) + 112px); padding: 8px 10px; }
+    #top .stat { display: none; }
+    #full { right: max(8px, env(safe-area-inset-right, 0px)); top: calc(8px + env(safe-area-inset-top, 0px)); padding: 9px 10px; }
+    #toggle { display: inline-block; }
+    #top:not(.open) .more { display: none; }
+    #search { width: 100%; box-sizing: border-box; font-size: 16px; }
+    .row label { width: 100%; justify-content: space-between; }
+    input[type=range] { width: 60%; }
+    .chips { max-height: 90px; }
+    #info { left: 0; right: 0; bottom: 0; width: auto; max-height: 46vh; border-radius: 14px 14px 0 0;
+            padding: 12px 14px calc(12px + env(safe-area-inset-bottom, 0px)); font-size: 13px; }
+    #info li { padding: 7px 0; }
+  }
+  @media (max-height: 500px) and (min-width: 641px) {
+    #hint { display: none; }
+    #top { top: calc(6px + env(safe-area-inset-top, 0px)); left: max(8px, env(safe-area-inset-left, 0px));
+           right: auto; width: min(360px, 48vw); padding: 6px 10px; max-height: calc(100% - 12px); overflow: auto; box-sizing: border-box; }
+    #top h1 { font-size: 14px; }
+    #top .stat { display: none; }
+    #toggle { display: inline-block; }
+    #top:not(.open) .more { display: none; }
+    #search { width: 100%; box-sizing: border-box; font-size: 16px; }
+    .row { margin-top: 6px; }
+    .row label { width: 100%; justify-content: space-between; }
+    input[type=range] { width: 55%; }
+    .chips { max-height: none; }
+    #full { top: calc(6px + env(safe-area-inset-top, 0px)); }
+    #info { top: calc(44px + env(safe-area-inset-top, 0px)); bottom: calc(6px + env(safe-area-inset-bottom, 0px));
+            right: max(8px, env(safe-area-inset-right, 0px)); width: min(380px, 44vw); max-height: none; font-size: 12px; }
+  }
+</style></head><body>
+<div id="gl"></div>
+<div id="labels"></div>
+<div id="top" class="ui">
+  <h1>Earth 신경망 지도</h1><span class="stat" id="stat"></span>
+  <button id="toggle" aria-expanded="false">조작</button>
+  <div class="more">
+  <div class="row">
+    <input id="search" list="names" placeholder="값 찾기 (예: 식량)">
+    <datalist id="names"></datalist>
+    <label>흐름 <input id="speed" type="range" min="0" max="3" step="0.1" value="1"></label>
+    <label>약한 선 숨김 <input id="thresh" type="range" min="0" max="1" step="0.05" value="0"></label>
+    <button id="only" aria-pressed="false">고른 점 연결만</button>
+    <button id="rotate" aria-pressed="true">자동 회전</button>
+  </div>
+  <div class="row legend">
+    <span><b style="background:var(--up)"></b>올림</span><span><b style="background:var(--down)"></b>내림</span>
+    <span><b style="background:var(--block)"></b>막음</span><span><b style="background:var(--other)"></b>일으킴·기타</span>
+  </div>
+  <div class="chips" id="chips"></div>
+  </div>
+</div>
+<div id="info" class="ui"></div>
+<button id="full" aria-pressed="false">⛶ 전체화면</button>
+<div id="hint" class="ui">끌기: 돌리기 · 휠: 확대 · 점 클릭: 고르기 + 신호 쏘기 · 빈 곳 클릭: 해제</div>
+
+<script src="data.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
+<script>
+const D = window.NEURAL;
+const PHONE = matchMedia("(max-width: 640px), (max-height: 500px)").matches, TOUCH = matchMedia("(pointer: coarse)").matches;
+const MOD_KO = { Engine: "변수·기후", Sim: "시뮬 진행", Civilization: "문명·특성", Dynasties: "왕조·인물", Wars: "전쟁",
+  Factions: "파벌", Bonds: "유대", Leaders: "지도자", Uprisings: "봉기·혁명", Social: "주민", Rail: "역사 레일",
+  Diplomacy: "외교", Trade: "교역", Migration: "이주", Doctrine: "교리", Ideology: "이념", Interventions: "개입",
+  Policy: "정책", Exploration: "탐험", Religions: "종교", Diffusion: "확산", "기타": "기타" };
+const SIGN_COL = { 1: 0xffb347, [-1]: 0x4fc3ff, [-2]: 0xff5a6a, 0: 0xb490ff };
+
+// ---------- 그래프 준비 ----------
+const nodes = D.nodes, edges = D.edges, N = nodes.length;
+const idx = new Map(nodes.map((n, i) => [n.id, i]));
+edges.forEach(e => { e.a = idx.get(e.s); e.b = idx.get(e.t); });
+const outE = nodes.map(() => []), inE = nodes.map(() => []);
+edges.forEach((e, k) => { outE[e.a].push(k); inE[e.b].push(k); });
+const deg = nodes.map((_, i) => outE[i].length + inE[i].length);
+const mods = [...new Set(nodes.map(n => n.m))].sort((x, y) =>
+  nodes.filter(n => n.m === y).length - nodes.filter(n => n.m === x).length);
+const modCol = new Map(mods.map((m, i) => [m, new THREE.Color().setHSL((i * 0.618) % 1, 0.65, 0.6)]));
+
+// 시드 고정 난수(매번 같은 모양)
+let seed = 7; const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+
+// 모듈 중심: 구 위에 고르게
+const R = 330, anchor = new Map();
+mods.forEach((m, i) => {
+  const y = 1 - (i + 0.5) / mods.length * 2, r = Math.sqrt(1 - y * y), th = i * 2.39996;
+  anchor.set(m, new THREE.Vector3(Math.cos(th) * r * R, y * R * 0.8, Math.sin(th) * r * R));
+});
+const P = new Float32Array(N * 3);
+nodes.forEach((n, i) => {
+  const a = anchor.get(n.m);
+  P[i*3] = a.x + (rnd() - .5) * 120; P[i*3+1] = a.y + (rnd() - .5) * 120; P[i*3+2] = a.z + (rnd() - .5) * 120;
+});
+// 힘 배치: 선은 당기고, 점끼리는 밀고, 모듈 중심으로 살짝 끌기
+(function layout() {
+  const V = new Float32Array(N * 3);
+  for (let it = 0; it < 90; it++) {
+    const cool = 1 - it / 90;
+    for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) {
+      const dx = P[i*3]-P[j*3], dy = P[i*3+1]-P[j*3+1], dz = P[i*3+2]-P[j*3+2];
+      const d2 = dx*dx + dy*dy + dz*dz + 1;
+      if (d2 > 6400) continue;
+      const f = 120 / d2;
+      V[i*3]+=dx*f; V[i*3+1]+=dy*f; V[i*3+2]+=dz*f; V[j*3]-=dx*f; V[j*3+1]-=dy*f; V[j*3+2]-=dz*f;
+    }
+    for (const e of edges) {
+      const i = e.a, j = e.b;
+      const dx = P[j*3]-P[i*3], dy = P[j*3+1]-P[i*3+1], dz = P[j*3+2]-P[i*3+2];
+      const f = 0.012;
+      V[i*3]+=dx*f; V[i*3+1]+=dy*f; V[i*3+2]+=dz*f; V[j*3]-=dx*f; V[j*3+1]-=dy*f; V[j*3+2]-=dz*f;
+    }
+    for (let i = 0; i < N; i++) {
+      const a = anchor.get(nodes[i].m);
+      for (let c = 0; c < 3; c++) {
+        V[i*3+c] += ([a.x, a.y, a.z][c] - P[i*3+c]) * 0.02;
+        P[i*3+c] += Math.max(-8, Math.min(8, V[i*3+c])) * cool;
+        V[i*3+c] *= 0.5;
+      }
+    }
+  }
+})();
+const pos = i => new THREE.Vector3(P[i*3], P[i*3+1], P[i*3+2]);
+
+// ---------- 장면 ----------
+const W = () => innerWidth, H = () => innerHeight;
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, PHONE ? 1.5 : 2));
+renderer.setSize(W(), H());
+document.getElementById("gl").appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x05070c, 0.0009);
+const camera = new THREE.PerspectiveCamera(55, W() / H(), 1, 5000);
+// 처음 거리: 지도 공(반지름 약 450)이 화면 짧은 쪽에 꽉 차게
+const fitDist = Math.min(1400, 450 / (Math.tan(THREE.MathUtils.degToRad(27.5)) * Math.min(1, W() / H())));
+camera.position.set(0, fitDist * 0.13, fitDist);
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.autoRotate = true; controls.autoRotateSpeed = 0.35;
+const composer = new THREE.EffectComposer(renderer);
+composer.addPass(new THREE.RenderPass(scene, camera));
+const bloom = new THREE.UnrealBloomPass(new THREE.Vector2(W(), H()), 1.25, 0.6, 0.05);
+composer.addPass(bloom);
+
+// 빛나는 점 셰이더(점과 신호 같이 씀)
+const glowMat = (scale) => new THREE.ShaderMaterial({
+  uniforms: { scale: { value: scale } },
+  vertexShader: `attribute float size; attribute vec3 color; varying vec3 vC; uniform float scale;
+    void main(){ vC = color; vec4 mv = modelViewMatrix * vec4(position,1.0);
+      gl_PointSize = size * scale / -mv.z; gl_Position = projectionMatrix * mv; }`,
+  fragmentShader: `varying vec3 vC; void main(){ float d = length(gl_PointCoord - 0.5);
+      float a = smoothstep(0.5, 0.0, d); float core = smoothstep(0.18, 0.0, d);
+      gl_FragColor = vec4(vC * (a * 0.7 + core * 1.4), a); }`,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+
+// 점(뉴런)
+const nGeo = new THREE.BufferGeometry();
+nGeo.setAttribute("position", new THREE.BufferAttribute(P, 3));
+const nCol = new Float32Array(N * 3), nSize = new Float32Array(N), baseSize = new Float32Array(N);
+nodes.forEach((n, i) => { baseSize[i] = 6 + Math.sqrt(deg[i]) * 5; });
+nGeo.setAttribute("color", new THREE.BufferAttribute(nCol, 3));
+nGeo.setAttribute("size", new THREE.BufferAttribute(nSize, 1));
+scene.add(new THREE.Points(nGeo, glowMat(600)));
+
+// 선(시냅스): 살짝 휜 곡선
+const SEG = 10, curves = edges.map((e, k) => {
+  const a = pos(e.a), b = pos(e.b), mid = a.clone().add(b).multiplyScalar(0.5);
+  const len = a.distanceTo(b), off = new THREE.Vector3(rnd()-.5, rnd()-.5, rnd()-.5).normalize().multiplyScalar(len * 0.18);
+  return new THREE.QuadraticBezierCurve3(a, mid.add(off), b);
+});
+const lPos = new Float32Array(edges.length * SEG * 6), lCol = new Float32Array(edges.length * SEG * 6);
+curves.forEach((c, k) => {
+  const pts = c.getPoints(SEG);
+  for (let s = 0; s < SEG; s++) {
+    const o = (k * SEG + s) * 6;
+    lPos.set([pts[s].x, pts[s].y, pts[s].z, pts[s+1].x, pts[s+1].y, pts[s+1].z], o);
+  }
+});
+const lGeo = new THREE.BufferGeometry();
+lGeo.setAttribute("position", new THREE.BufferAttribute(lPos, 3));
+lGeo.setAttribute("color", new THREE.BufferAttribute(lCol, 3));
+scene.add(new THREE.LineSegments(lGeo, new THREE.LineBasicMaterial({
+  vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending })));
+
+// 신호(불빛)
+const MAXP = PHONE ? 1200 : 2500, pPos = new Float32Array(MAXP * 3), pCol = new Float32Array(MAXP * 3), pSize = new Float32Array(MAXP);
+const pGeo = new THREE.BufferGeometry();
+pGeo.setAttribute("position", new THREE.BufferAttribute(pPos, 3));
+pGeo.setAttribute("color", new THREE.BufferAttribute(pCol, 3));
+pGeo.setAttribute("size", new THREE.BufferAttribute(pSize, 1));
+scene.add(new THREE.Points(pGeo, glowMat(600)));
+let pulses = [];
+const flash = new Float32Array(N);
+
+// 먼지(배경 별)
+{ const g = new THREE.BufferGeometry(), a = new Float32Array(3000);
+  for (let i = 0; i < a.length; i++) a[i] = (rnd() - .5) * 3000;
+  g.setAttribute("position", new THREE.BufferAttribute(a, 3));
+  scene.add(new THREE.Points(g, new THREE.PointsMaterial({ size: 1.2, color: 0x2a3a55 }))); }
+
+// ---------- 상태 ----------
+const modOn = new Map(mods.map(m => [m, true]));
+let selected = -1, onlyMode = false, thresh = 0, speed = 1;
+const visibleNode = i => modOn.get(nodes[i].m);
+const visibleEdge = k => { const e = edges[k];
+  if (!visibleNode(e.a) || !visibleNode(e.b) || e.w < thresh) return false;
+  if (onlyMode && selected >= 0) return e.a === selected || e.b === selected;
+  return true; };
+const related = new Set();
+
+function paint() {
+  related.clear();
+  if (selected >= 0) { related.add(selected);
+    outE[selected].forEach(k => related.add(edges[k].b)); inE[selected].forEach(k => related.add(edges[k].a)); }
+  const tmp = new THREE.Color();
+  edges.forEach((e, k) => {
+    let v = visibleEdge(k) ? 0.10 + e.w * 0.25 : 0;
+    if (v && selected >= 0) v = (e.a === selected || e.b === selected) ? 0.9 : v * 0.25;
+    tmp.setHex(SIGN_COL[e.sign]).multiplyScalar(v);
+    for (let s = 0; s < SEG * 2; s++) lCol.set([tmp.r, tmp.g, tmp.b], (k * SEG * 2 + s) * 3);
+  });
+  lGeo.attributes.color.needsUpdate = true;
+}
+
+// ---------- 신호 흐름 ----------
+function fire(k, energy) {
+  if (pulses.length >= MAXP || !visibleEdge(k)) return;
+  pulses.push({ k, t: 0, v: 0.25 + edges[k].w * 0.35 + rnd() * 0.15, energy });
+}
+function burst(i, energy) { flash[i] = 1.4; outE[i].forEach(k => fire(k, energy)); }
+
+function stepPulses(dt) {
+  // 평소 활동: 무작위 선에서 저절로 신호가 생긴다
+  const spawn = speed * dt * 40;
+  for (let s = 0; s < spawn; s++) if (rnd() < spawn - s) fire(Math.floor(rnd() * edges.length), 0.55);
+  const keep = [];
+  for (const p of pulses) {
+    p.t += p.v * dt * speed;
+    if (p.t >= 1) {
+      const e = edges[p.k]; flash[e.b] = Math.min(1.6, flash[e.b] + 0.6 + p.energy * 0.4);
+      // 도착한 점이 다음 선으로 신호를 넘김(인과 연쇄)
+      if (p.energy > 0.15) for (const k of outE[e.b]) if (rnd() < 0.5 * p.energy) fire(k, p.energy * 0.8);
+    } else keep.push(p);
+  }
+  pulses = keep;
+  const c = new THREE.Color();
+  for (let i = 0; i < MAXP; i++) {
+    const p = pulses[i];
+    if (!p) { pSize[i] = 0; continue; }
+    const pt = curves[p.k].getPoint(p.t);
+    pPos.set([pt.x, pt.y, pt.z], i * 3);
+    const hi = selected >= 0 && (edges[p.k].a === selected || edges[p.k].b === selected);
+    c.setHex(SIGN_COL[edges[p.k].sign]).multiplyScalar(selected >= 0 && !hi ? 0.35 : 1);
+    pCol.set([c.r, c.g, c.b], i * 3);
+    pSize[i] = (5 + p.energy * 9) * (hi ? 1.5 : 1);
+  }
+  pGeo.setDrawRange(0, MAXP);
+  pGeo.attributes.position.needsUpdate = pGeo.attributes.color.needsUpdate = pGeo.attributes.size.needsUpdate = true;
+}
+
+function stepNodes(dt) {
+  for (let i = 0; i < N; i++) {
+    flash[i] = Math.max(0, flash[i] - dt * 1.6);
+    const vis = visibleNode(i) && !(onlyMode && selected >= 0 && !related.has(i));
+    const dim = selected >= 0 && !related.has(i) ? 0.3 : 1;
+    const c = modCol.get(nodes[i].m);
+    const f = flash[i];
+    nCol[i*3] = (c.r * 0.75 + f * 0.8) * dim; nCol[i*3+1] = (c.g * 0.75 + f * 0.8) * dim; nCol[i*3+2] = (c.b * 0.75 + f * 0.8) * dim;
+    nSize[i] = vis ? baseSize[i] * (1 + f * 0.5) * (i === selected ? 1.8 : 1) : 0;
+  }
+  nGeo.attributes.color.needsUpdate = nGeo.attributes.size.needsUpdate = true;
+}
+
+// ---------- 이름표 ----------
+const labelBox = document.getElementById("labels");
+const topIdx = [...nodes.keys()].sort((a, b) => deg[b] - deg[a]).slice(0, PHONE ? 14 : 28);
+const labelEls = new Map();
+function labelFor(i) {
+  if (!labelEls.has(i)) { const d = document.createElement("div"); d.className = "lb"; d.textContent = nodes[i].id;
+    labelBox.appendChild(d); labelEls.set(i, d); }
+  return labelEls.get(i);
+}
+function updateLabels() {
+  const want = new Set(selected >= 0 ? [...related].slice(0, 40) : topIdx);
+  for (const [i, el] of labelEls) if (!want.has(i)) el.style.display = "none";
+  const v = new THREE.Vector3();
+  for (const i of want) {
+    if (!visibleNode(i)) continue;
+    const el = labelFor(i); v.set(P[i*3], P[i*3+1], P[i*3+2]).project(camera);
+    if (v.z > 1) { el.style.display = "none"; continue; }
+    el.style.display = "block"; el.classList.toggle("sel", i === selected);
+    el.style.left = ((v.x + 1) / 2 * W()) + "px"; el.style.top = ((1 - v.y) / 2 * H()) + "px";
+  }
+}
+
+// ---------- 고르기와 설명 ----------
+const info = document.getElementById("info");
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const VERB = { 1: "▲ 올림", [-1]: "▼ 내림", [-2]: "■ 막음", 0: "● 일으킴" };
+function edgeLi(k, other, incoming) {
+  const e = edges[k], col = SIGN_COL[e.sign].toString(16).padStart(6, "0");
+  const text = incoming ? `<b>${esc(nodes[other].id)}</b>이(가) 이것을 <span style="color:#${col}">${VERB[e.sign]}</span>`
+                        : `이것이 <b>${esc(nodes[other].id)}</b>을(를) <span style="color:#${col}">${VERB[e.sign]}</span>`;
+  return `<li data-n="${other}">${text}</li>`;
+}
+function select(i, shoot) {
+  selected = i; paint();
+  if (i < 0) { info.style.display = "none"; return; }
+  if (shoot) burst(i, 1);
+  const n = nodes[i];
+  info.innerHTML = `<button class="x" id="close">닫기</button><h2>${esc(n.id)}</h2>
+    <div class="meta">${esc(MOD_KO[n.m] || n.m)} · 받는 영향 ${inE[i].length} · 주는 영향 ${outE[i].length}</div>
+    <h3>이것을 움직이는 것</h3><ul>${inE[i].map(k => edgeLi(k, edges[k].a, true)).join("") || "<li>없음</li>"}</ul>
+    <h3>이것이 움직이는 것</h3><ul>${outE[i].map(k => edgeLi(k, edges[k].b, false)).join("") || "<li>없음</li>"}</ul>`;
+  info.style.display = "block";
+  info.querySelector("#close").onclick = () => select(-1);
+  info.querySelectorAll("li[data-n]").forEach(li => li.onclick = () => focusNode(+li.dataset.n));
+}
+function focusNode(i) {
+  if (!modOn.get(nodes[i].m)) { modOn.set(nodes[i].m, true); syncChips(); }
+  select(i, true);
+  const target = pos(i), dir = camera.position.clone().sub(controls.target).normalize();
+  flyTo = { t: 0, fromT: controls.target.clone(), toT: target, fromC: camera.position.clone(), toC: target.clone().add(dir.multiplyScalar(PHONE ? 420 : 320)) };
+}
+let flyTo = null;
+
+function pick(x, y) {
+  const v = new THREE.Vector3(); const r = TOUCH ? 30 : 18; let best = -1, bd = r * r;
+  for (let i = 0; i < N; i++) {
+    if (!nSize[i]) continue;
+    v.set(P[i*3], P[i*3+1], P[i*3+2]).project(camera); if (v.z > 1) continue;
+    const dx = (v.x + 1) / 2 * W() - x, dy = (1 - v.y) / 2 * H() - y, d = dx*dx + dy*dy;
+    if (d < bd) { bd = d; best = i; }
+  }
+  return best;
+}
+let down = null;
+renderer.domElement.addEventListener("pointerdown", e => { down = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener("pointerup", e => {
+  if (!down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 5) return;
+  const i = pick(e.clientX, e.clientY);
+  i >= 0 ? select(i, true) : select(-1);
+});
+renderer.domElement.addEventListener("pointermove", e => {
+  renderer.domElement.style.cursor = pick(e.clientX, e.clientY) >= 0 ? "pointer" : "grab";
+});
+
+// ---------- 조작판 ----------
+document.getElementById("stat").textContent = `점 ${N} · 선 ${edges.length} · 모듈 ${mods.length}`;
+document.getElementById("names").innerHTML = nodes.map(n => `<option value="${esc(n.id)}">`).join("");
+document.getElementById("search").addEventListener("change", e => {
+  const q = e.target.value.trim(); let i = idx.get(q);
+  if (i === undefined && q) i = nodes.findIndex(n => n.id.includes(q));
+  if (i >= 0) { focusNode(i); e.target.blur(); if (PHONE) tog.onclick(); } });
+document.getElementById("speed").oninput = e => speed = +e.target.value;
+document.getElementById("thresh").oninput = e => { thresh = +e.target.value; paint(); };
+const onlyBtn = document.getElementById("only");
+onlyBtn.onclick = () => { onlyMode = !onlyMode; onlyBtn.setAttribute("aria-pressed", onlyMode); paint(); };
+const topBox = document.getElementById("top"), tog = document.getElementById("toggle");
+tog.onclick = () => { const o = topBox.classList.toggle("open"); tog.setAttribute("aria-expanded", o); tog.textContent = o ? "접기" : "조작"; };
+// 전체화면: 되는 기기에서는 진짜 전체화면(+가로 고정 시도), 어디서든 조작판을 숨겨 지도만 보이게
+const fullBtn = document.getElementById("full");
+function setImmersive(on) {
+  document.body.classList.toggle("immersive", on);
+  fullBtn.setAttribute("aria-pressed", on);
+  fullBtn.textContent = on ? "✕ 나가기" : "⛶ 전체화면";
+}
+fullBtn.onclick = async () => {
+  const on = !document.body.classList.contains("immersive");
+  setImmersive(on);
+  const el = document.documentElement;
+  try {
+    if (on) {
+      await (el.requestFullscreen ? el.requestFullscreen({ navigationUI: "hide" }) : el.webkitRequestFullscreen?.());
+      await screen.orientation?.lock?.("landscape").catch(() => {});
+    } else if (document.fullscreenElement || document.webkitFullscreenElement) {
+      await (document.exitFullscreen ? document.exitFullscreen() : document.webkitExitFullscreen?.());
+    }
+  } catch (_) { /* 진짜 전체화면이 막힌 곳에서는 숨김 모드만 쓴다 */ }
+};
+const onFsChange = () => { if (!(document.fullscreenElement || document.webkitFullscreenElement)) setImmersive(false); };
+document.addEventListener("fullscreenchange", onFsChange);
+document.addEventListener("webkitfullscreenchange", onFsChange);
+const rotBtn = document.getElementById("rotate");
+rotBtn.onclick = () => { controls.autoRotate = !controls.autoRotate; rotBtn.setAttribute("aria-pressed", controls.autoRotate); };
+const chips = document.getElementById("chips");
+function syncChips() {
+  chips.innerHTML = mods.map(m => `<button class="chip" data-m="${m}" aria-pressed="${modOn.get(m)}" style="--c:#${modCol.get(m).getHexString()}">
+    <i></i>${MOD_KO[m] || m} ${nodes.filter(n => n.m === m).length}</button>`).join("");
+  chips.querySelectorAll(".chip").forEach(b => b.onclick = () => { modOn.set(b.dataset.m, !modOn.get(b.dataset.m)); syncChips(); paint(); });
+}
+syncChips(); paint();
+
+addEventListener("resize", () => {
+  camera.aspect = W() / H(); camera.updateProjectionMatrix();
+  renderer.setSize(W(), H()); composer.setSize(W(), H());
+});
+
+// ---------- 매 프레임 ----------
+const clock = new THREE.Clock();
+(function loop() {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  if (flyTo) {
+    flyTo.t = Math.min(1, flyTo.t + dt * 1.2); const k = 1 - Math.pow(1 - flyTo.t, 3);
+    controls.target.lerpVectors(flyTo.fromT, flyTo.toT, k); camera.position.lerpVectors(flyTo.fromC, flyTo.toC, k);
+    if (flyTo.t >= 1) flyTo = null;
+  }
+  const side = innerHeight <= 500 && innerWidth > 640 && selected >= 0;
+  camera.setViewOffset(W(), H(), side ? W() * 0.22 : 0, 0, W(), H());
+  controls.update(); stepPulses(dt); stepNodes(dt); updateLabels();
+  composer.render(); requestAnimationFrame(loop);
+})();
+</script>
+</body></html>
